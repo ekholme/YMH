@@ -1,0 +1,216 @@
+---
+title: "Transcript EDA"
+author: "EE"
+date: "5/12/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+library(tidytext)
+library(janitor)
+library(hrbrthemes)
+library(glue)
+library(extrafont)
+library(ggtext)
+
+trans <- read_csv(here::here("Data/ymh_transcripts_raw2.csv"))
+
+orange <- "#d49439"
+yellow <- "#fcec3c"
+black <- "#212028"
+white <- "#f4f4f6"
+
+ymh_cols <- c(orange, yellow)
+
+theme_set(theme_ipsum())
+
+font <- "Segoe UI Black"
+
+theme_update(
+  plot.background = element_rect(color = black, fill = black),
+  text = element_text(color = orange, family = font)
+)
+```
+
+Ok, so, we have data from 155 episodes: episodes 394 through 551 (with a handful missing in that range), plus episode 345 somehow.
+
+# Reshaping to One Row per Episode
+```{r reshape one obs}
+trans_one_obs <- trans %>%
+  group_by(published_date, video_url, title, description, ep_num, vid) %>%
+  summarize(full_text = str_c(text, collapse = " ") %>%
+              str_to_lower()) %>%
+  ungroup()
+
+head(trans_one_obs) %>%
+  View()
+```
+
+# Looking at Episode Numbers
+```{r view data}
+trans_one_obs %>%
+  arrange(ep_num) %>%
+  pull(ep_num)
+```
+
+Let's also look at published date. This is the date that the video is uploaded to YouTube.
+```{r date range}
+range(trans_one_obs$published_date)
+```
+
+I know that some earlier episodes were "batch uploaded," so the published date won't actually be the "air date." This means that this is likely less useful for us. But let's check it out anyway
+```{r date count}
+trans_one_obs %>%
+  count(published_date)
+```
+Right -- so we have two very large batch uploads in May 2018 and May 2019, then what looks like regular weekly uploads after that.
+
+# Exploring Words over Time
+
+What if we look at the number of words in each episode over time?
+```{r words per ep}
+trans_one_obs %>%
+  mutate(n_words = str_count(full_text, "\\S+")) %>%
+  ggplot(aes(x = ep_num, y = n_words)) +
+    geom_line(color = yellow)
+```
+
+Writing a string graph and count functions
+```{r}
+str_graph <- function(df, name, string) {
+  df %>%
+    mutate("{name}" := str_count(full_text, string)) %>% #this works so far
+    ggplot(aes(ep_num, y = .data[[name]])) +
+      geom_line(color = yellow)
+}
+
+count_name <- function(df = ., name, string) {
+  df %>%
+    mutate("{name}" := str_count(full_text, string))
+}
+
+
+```
+
+
+For shits and giggles, let's see what the count of "feathering" looks like over time
+
+```{r}
+trans_one_obs %>%
+  str_graph("feathers", "feather")
+```
+
+And Garths
+```{r}
+trans_one_obs %>%
+  str_graph("garths", "garth")
+```
+
+And Julia's
+```{r}
+trans_one_obs %>%
+  str_graph("julias", "julia")
+```
+
+And cool guys
+```{r}
+trans_one_obs %>%
+  str_graph("cgs", "cool guy")
+```
+
+
+# Most Common Words
+```{r}
+trans_long <- trans_one_obs %>%
+  arrange(ep_num) %>%
+  mutate(group = 1:nrow(trans_one_obs) %/% 4) %>%
+  unnest_tokens(word, full_text) %>%
+  anti_join(stop_words)
+
+trans_long %>%
+  filter(word != "yeah") %>%
+  count(word, sort = TRUE) %>%
+  top_n(n = 20) %>%
+  ggplot(aes(x = n, y = fct_reorder(word, n))) +
+    geom_col(fill = yellow) +
+    labs(
+      x = "Count",
+      y = "",
+      title = "Fucking Shit",
+      subtitle = "Most common words used in YMH Episodes 394-551."
+    ) +
+    theme(
+      plot.title.position = "plot",
+      axis.text = element_text(color = white)
+    )
+```
+
+# Common Words by "Period"
+This will look at common words across different "periods" of YMH. I'm considering a "period" to be a segment of 4 episodes grouped together. This will let us track which words are unique to each of these periods in relation to other periods
+
+```{r tf idf calc}
+trans_tf_idf <- trans_long %>%
+  filter(ep_num > 390) %>%
+  count(group, word, sort = TRUE) %>%
+  filter(n > 5) %>%
+  bind_tf_idf(word, group, n) %>%
+  group_by(group) %>%
+  top_n(n = 10, wt = tf_idf)
+
+```
+
+And let's make a viz of the top words for each period.
+```{r top word period}
+trans_tf_idf %>%
+  group_by(group) %>%
+  arrange(group, tf_idf) %>%  
+  slice(1:10) %>%
+  mutate(inv_rank = row_number(group)) %>%
+  ggplot(aes(x = group, y = inv_rank)) +
+    geom_text(aes(label = word, size = (inv_rank), color = inv_rank), family = font) +
+    scale_color_gradient(
+      low = yellow, high = orange 
+    ) +
+    labs(
+      title = "YMH's Defining Words",
+      subtitle = "This plot shows the words that define Your Mom's House, Episodes 394-551. Each column represents a group of four episodes, and the words in each column represent words that define those episodes when compared to all of the other YMH episodes. Words range from <span style='color:#d49439; font-size:24pt'>most definitive</span> at the top to <span style='color:#fcec3c; font-size:8pt'>less definitive</span> at the bottom.",
+      x = "",
+      y = "",
+      caption = "Data: YMH YouTube Transcripts | Viz: BurtFrart"
+    ) +
+    scale_size_continuous(
+      breaks = 1:10
+    ) +
+    scale_x_continuous(
+      limits = c(0, 38),
+      breaks = c(0, 38),
+      labels = c("Episode 394", "Episode 551")
+    ) +
+    scale_y_continuous(
+    ) +
+    theme(
+      legend.position = "none",
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank(),
+      axis.text.y = element_blank(),
+      axis.title.y = element_text(family = font),
+      axis.text.x = element_text(color = white, size = 18),
+      plot.title = element_text(color = white, family = font, size = 34, hjust = .5),
+      plot.subtitle = element_markdown(color = white, family = font, size = 20, hjust = .5),
+      text = element_text(size = 10),
+      plot.caption = element_markdown(color = white)
+     # plot.margin = margin(t = .25, r = 1, b = .25, l = .25, unit = "in")
+    )
+
+ggsave(here::here("Viz/defining_words.png"), device = "png", width = 48)
+#this is a pretty good start -- want to get 5 per period, plus put the y-axis as the rank within each group. also set a color scale (orange to yellow)
+```
+
+
+## Ideas:
++ tf_idf per episode (distinctive words per episode) -- or, another version, per every 4 epsiodes (to get rid of some random variation that's likely to pop up bc of ads). Will probably want to dump the first episode for this.
++ topic modeling
++ count of various words (retarded, feathering, robert paul champagne, etc, julia, brown, jeans, garth)
